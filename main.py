@@ -1,11 +1,11 @@
 # =============================
-# OilLogix MVP - FastAPI Backend
+# OilLogix MVP - FULL COMMENTED VERSION
 # =============================
 
-# FastAPI for building the API
-from fastapi import FastAPI, Depends, HTTPException  # pyright: ignore[reportMissingImports]
+# FastAPI is the web framework used to build the API
+from fastapi import FastAPI, Depends, HTTPException
 
-# SQLAlchemy for database interaction (ORM)
+# SQLAlchemy is used to interact with the database
 from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -13,143 +13,115 @@ from sqlalchemy.orm import sessionmaker, Session
 # Used for timestamps
 from datetime import datetime
 
-
 # =============================
-# Database Configuration
+# DATABASE SETUP
 # =============================
 
-# SQLite database file (stored locally in project folder)
+# SQLite database (simple file-based DB for MVP)
 DATABASE_URL = "sqlite:///./oillogix.db"
 
-# Create database engine (connection to DB)
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+# Create database engine
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False}  # needed for SQLite
+)
 
-# Create session factory (each request gets its own DB session)
+# Create session factory (used to talk to DB)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Base class for all database models
+# Base class for models
 Base = declarative_base()
 
-
 # =============================
-# FastAPI App Initialization
+# FASTAPI APP
 # =============================
 
 app = FastAPI()
 
-
 # =============================
-# Database Model
+# DATABASE MODEL (TABLE)
 # =============================
 
-# This class represents the "shipments" table in the database
 class Shipment(Base):
     __tablename__ = "shipments"  # table name
 
-    id = Column(Integer, primary_key=True, index=True)  # unique ID
-    name = Column(String, index=True)                   # shipment name
-    origin = Column(String)                             # where it starts
-    destination = Column(String)                        # where it's going
-    status = Column(String, default="Pending")          # current status
-    eta = Column(String)                                # estimated arrival
-    last_updated = Column(DateTime, default=datetime.utcnow)  # timestamp
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)  # shipment name
+    origin = Column(String)  # where it starts
+    destination = Column(String)  # where it goes
+    status = Column(String, default="Pending")  # current status
+    eta = Column(String)  # estimated arrival
+    last_updated = Column(DateTime, default=datetime.utcnow)
 
-
-# Create the table in the database if it doesn't exist
+# Create tables in DB
 Base.metadata.create_all(bind=engine)
 
-
 # =============================
-# Dependency (Database Session)
+# DATABASE DEPENDENCY
 # =============================
 
-# This function provides a DB session to each API request
+# This function creates a DB session for each request
 def get_db():
-    db = SessionLocal()  # create session
+    db = SessionLocal()
     try:
-        yield db         # give session to route
+        yield db
     finally:
-        db.close()       # always close after request
-
+        db.close()
 
 # =============================
-# API Routes
+# API ROUTES (BACKEND LOGIC)
 # =============================
 
 # CREATE a new shipment
 @app.post("/shipments/")
-def create_shipment(
-    name: str,
-    origin: str,
-    destination: str,
-    eta: str,
-    db: Session = Depends(get_db)
-):
-    # Create new shipment object
+def create_shipment(name: str, origin: str, destination: str, eta: str, db: Session = Depends(get_db)):
     shipment = Shipment(
         name=name,
         origin=origin,
         destination=destination,
         eta=eta
     )
-
-    # Save to database
-    db.add(shipment)
-    db.commit()
-    db.refresh(shipment)  # get updated data (like ID)
-
+    db.add(shipment)  # add to DB
+    db.commit()       # save changes
+    db.refresh(shipment)  # reload object
     return shipment
-
 
 # READ all shipments
 @app.get("/shipments/")
 def get_shipments(db: Session = Depends(get_db)):
-    # Return all rows from shipments table
     return db.query(Shipment).all()
-
 
 # UPDATE shipment status
 @app.put("/shipments/{shipment_id}")
 def update_status(shipment_id: int, status: str, db: Session = Depends(get_db)):
-    # Find shipment by ID
     shipment = db.query(Shipment).filter(Shipment.id == shipment_id).first()
 
-    # If not found → return error
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
 
-    # Update fields
     shipment.status = status
     shipment.last_updated = datetime.utcnow()
 
-    # Save changes
     db.commit()
-
     return shipment
 
-
-# DELETE a shipment
+# DELETE shipment
 @app.delete("/shipments/{shipment_id}")
 def delete_shipment(shipment_id: int, db: Session = Depends(get_db)):
-    # Find shipment
     shipment = db.query(Shipment).filter(Shipment.id == shipment_id).first()
 
-    # If not found → error
     if not shipment:
         raise HTTPException(status_code=404, detail="Shipment not found")
 
-    # Delete from DB
     db.delete(shipment)
     db.commit()
 
     return {"message": "Deleted"}
 
-
 # =============================
-# Simple Frontend (HTML + JS)
+# FRONTEND (HTML + JAVASCRIPT)
 # =============================
 
-# Basic frontend UI served directly from FastAPI
 html_content = """
 <!DOCTYPE html>
 <html>
@@ -157,23 +129,67 @@ html_content = """
     <title>OilLogix Dashboard</title>
 </head>
 <body>
-    <h1>Shipment Tracker</h1>
 
-    <!-- Form to add shipment -->
-    <h2>Add Shipment</h2>
+    <!-- Language Selector -->
+    <select id="lang" onchange="setLanguage()">
+      <option value="en">English</option>
+      <option value="pt">Português</option>
+    </select>
+
+    <!-- Title -->
+    <h1 id="title">Shipment Tracker</h1>
+
+    <!-- Add Shipment Form -->
+    <h2 id="add_title">Add Shipment</h2>
     <input id="name" placeholder="Name"><br>
     <input id="origin" placeholder="Origin"><br>
     <input id="destination" placeholder="Destination"><br>
     <input id="eta" placeholder="ETA"><br>
     <button onclick="addShipment()">Add</button>
 
-    <!-- List of shipments -->
-    <h2>All Shipments</h2>
+    <!-- Shipment List -->
+    <h2 id="list_title">All Shipments</h2>
     <ul id="list"></ul>
 
 <script>
 
-// Fetch all shipments from backend
+// =============================
+// TRANSLATIONS (EN + PT)
+// =============================
+
+let currentLang = 'en';
+
+const translations = {
+  en: {
+    title: "Shipment Tracker",
+    add: "Add Shipment",
+    list: "All Shipments"
+  },
+  pt: {
+    title: "Rastreamento de Encomendas",
+    add: "Adicionar Envio",
+    list: "Todos os Envios"
+  }
+};
+
+// Change language
+function setLanguage() {
+  currentLang = document.getElementById("lang").value;
+  renderText();
+}
+
+// Apply translations to UI
+function renderText() {
+  document.getElementById("title").innerText = translations[currentLang].title;
+  document.getElementById("add_title").innerText = translations[currentLang].add;
+  document.getElementById("list_title").innerText = translations[currentLang].list;
+}
+
+// =============================
+// API CALLS
+// =============================
+
+// Fetch shipments from backend
 async function fetchShipments() {
     const res = await fetch('/shipments/');
     const data = await res.json();
@@ -181,7 +197,6 @@ async function fetchShipments() {
     const list = document.getElementById('list');
     list.innerHTML = '';
 
-    // Display each shipment
     data.forEach(s => {
         const li = document.createElement('li');
         li.innerHTML = `${s.name} - ${s.status} 
@@ -190,7 +205,7 @@ async function fetchShipments() {
     });
 }
 
-// Add a new shipment
+// Add new shipment
 async function addShipment() {
     const name = document.getElementById('name').value;
     const origin = document.getElementById('origin').value;
@@ -201,7 +216,7 @@ async function addShipment() {
         method: 'POST'
     });
 
-    fetchShipments(); // refresh list
+    fetchShipments();
 }
 
 // Update shipment status
@@ -212,10 +227,10 @@ async function updateStatus(id) {
         method: 'PUT'
     });
 
-    fetchShipments(); // refresh list
+    fetchShipments();
 }
 
-// Load shipments on page load
+// Initial load
 fetchShipments();
 
 </script>
@@ -223,15 +238,15 @@ fetchShipments();
 </html>
 """
 
-# Used to return HTML instead of JSON
-from fastapi.responses import HTMLResponse  # type: ignore
+# =============================
+# SERVE HTML PAGE
+# =============================
 
+from fastapi.responses import HTMLResponse
 
-# Root route → serves the frontend UI
 @app.get("/", response_class=HTMLResponse)
 def home():
     return html_content
-
 
 # ====================================
 # Run with:
