@@ -1,98 +1,204 @@
-# ===============================
-# OilLogix MVP - Enhanced Version
-# ===============================
+# =============================
+# OilLogix SaaS - Auth + Multi-User
+# =============================
 
-# -------- IMPORTS --------
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.responses import HTMLResponse
-from sqlalchemy import create_engine, Column, Integer, String, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from datetime import datetime
+from sqlalchemy.orm import sessionmaker, Session, relationship
+from datetime import datetime, timedelta
 
-# -------- DATABASE SETUP --------
+# Auth libs
+from passlib.context import CryptContext
+from jose import jwt
+
+# =============================
+# CONFIG
+# =============================
+
+SECRET_KEY = "supersecretkey"  # change in production
+ALGORITHM = "HS256"
 
 DATABASE_URL = "sqlite:///./oillogix.db"
 
-# Create DB engine (SQLite file)
+# =============================
+# DB SETUP
+# =============================
+
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-
-# Session factory
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Base class for models
+SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
-# -------- FASTAPI APP --------
 app = FastAPI()
 
-# -------- DATABASE MODEL --------
+# =============================
+# SECURITY
+# =============================
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def hash_password(password: str):
+    return pwd_context.hash(password)
+
+def verify_password(plain, hashed):
+    return pwd_context.verify(plain, hashed)
+
+def create_token(data: dict):
+    data["exp"] = datetime.utcnow() + timedelta(hours=24)
+    return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
+
+# =============================
+# MODELS
+# =============================
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    email = Column(String, unique=True)
+    password = Column(String)
+    language = Column(String, default="en")
+
+    shipments = relationship("Shipment", back_populates="owner")
+
 
 class Shipment(Base):
-    """
-    Represents a shipment in the database
-    """
     __tablename__ = "shipments"
 
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, index=True)
+    id = Column(Integer, primary_key=True)
+    name = Column(String)
     origin = Column(String)
     destination = Column(String)
-    status = Column(String, default="Pending")  # Default status
+    status = Column(String, default="Pending")
     eta = Column(String)
     last_updated = Column(DateTime, default=datetime.utcnow)
 
-# Create table automatically
+    user_id = Column(Integer, ForeignKey("users.id"))
+    owner = relationship("User", back_populates="shipments")
+
+
 Base.metadata.create_all(bind=engine)
 
-# -------- DB DEPENDENCY --------
+# =============================
+# DB DEPENDENCY
+# =============================
 
 def get_db():
-    """
-    Creates and closes DB session per request
-    """
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
-# -------- API ROUTES --------
+# =============================
+# AUTH HELPERS
+# =============================
 
-# CREATE shipment
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+security = HTTPBearer()
+
+def get_current_user(
+    creds: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
+    token = creds.credentials
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("user_id")
+    except:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    return user
+
+# =============================
+# AUTH ROUTES
+# =============================
+
+@app.post("/register")
+def register(email: str, password: str, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.email == email).first()
+    if existing:
+        raise HTTPException(400, "User already exists")
+
+    user = User(
+        email=email,
+        password=hash_password(password)
+    )
+
+    db.add(user)
+    db.commit()
+
+    return {"message": "User created"}
+
+@app.post("/login")
+def login(email: str, password: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == email).first()
+
+    if not user or not verify_password(password, user.password):
+        raise HTTPException(401, "Invalid credentials")
+
+    token = create_token({"user_id": user.id})
+
+    return {
+        "access_token": token,
+        "language": user.language
+    }
+
+# =============================
+# SHIPMENTS (USER SCOPED)
+# =============================
+
 @app.post("/shipments/")
-def create_shipment(name: str, origin: str, destination: str, eta: str, db: Session = Depends(get_db)):
+def create_shipment(
+    name: str,
+    origin: str,
+    destination: str,
+    eta: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
     shipment = Shipment(
         name=name,
         origin=origin,
         destination=destination,
-        eta=eta
+        eta=eta,
+        owner=user
     )
+
     db.add(shipment)
     db.commit()
-    db.refresh(shipment)
     return shipment
 
-# READ all shipments
+
 @app.get("/shipments/")
-def get_shipments(status: str = None, db: Session = Depends(get_db)):
-    """
-    Optional filtering by status
-    """
-    query = db.query(Shipment)
+def get_shipments(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    return db.query(Shipment).filter(Shipment.user_id == user.id).all()
 
-    if status:
-        query = query.filter(Shipment.status == status)
 
-    return query.all()
-
-# UPDATE shipment status
-@app.put("/shipments/{shipment_id}")
-def update_status(shipment_id: int, status: str, db: Session = Depends(get_db)):
-    shipment = db.query(Shipment).filter(Shipment.id == shipment_id).first()
+@app.put("/shipments/{id}")
+def update_status(
+    id: int,
+    status: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    shipment = db.query(Shipment).filter(
+        Shipment.id == id,
+        Shipment.user_id == user.id
+    ).first()
 
     if not shipment:
-        raise HTTPException(status_code=404, detail="Shipment not found")
+        raise HTTPException(404, "Not found")
 
     shipment.status = status
     shipment.last_updated = datetime.utcnow()
@@ -100,279 +206,62 @@ def update_status(shipment_id: int, status: str, db: Session = Depends(get_db)):
     db.commit()
     return shipment
 
-# DELETE shipment
-@app.delete("/shipments/{shipment_id}")
-def delete_shipment(shipment_id: int, db: Session = Depends(get_db)):
-    shipment = db.query(Shipment).filter(Shipment.id == shipment_id).first()
+
+@app.delete("/shipments/{id}")
+def delete_shipment(
+    id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    shipment = db.query(Shipment).filter(
+        Shipment.id == id,
+        Shipment.user_id == user.id
+    ).first()
 
     if not shipment:
-        raise HTTPException(status_code=404, detail="Shipment not found")
+        raise HTTPException(404, "Not found")
 
     db.delete(shipment)
     db.commit()
     return {"message": "Deleted"}
 
-
 # =============================
-# FRONTEND (HTML + CSS + JS)
+# BASIC FRONTEND (LOGIN)
 # =============================
 
 html_content = """
 <!DOCTYPE html>
 <html>
-<head>
-    <title>OilLogix Dashboard</title>
-
-    <style>
-        body { font-family: Arial; padding: 20px; }
-
-        input, select, button {
-            margin: 5px;
-            padding: 8px;
-        }
-
-        .card {
-            padding: 10px;
-            margin: 10px 0;
-            border-radius: 8px;
-            border: 1px solid #ccc;
-        }
-
-        .Pending { background-color: #eee; }
-        .In-Transit { background-color: #cce5ff; }
-        .Delayed { background-color: #ffcccc; }
-        .Delivered { background-color: #ccffcc; }
-
-        .badge {
-            padding: 5px 10px;
-            border-radius: 12px;
-            font-weight: bold;
-        }
-
-        .topbar {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-    </style>
-</head>
-
 <body>
 
-<div class="topbar">
-    <h1 id="title">Shipment Tracker</h1>
-
-    <!-- LANGUAGE SELECTOR -->
-    <select id="language" onchange="changeLanguage()">
-        <option value="en">EN</option>
-        <option value="pt">PT</option>
-    </select>
-</div>
-
-<h2 id="addTitle">Add Shipment</h2>
-<input id="name" placeholder="Name">
-<input id="origin" placeholder="Origin">
-<input id="destination" placeholder="Destination">
-<input id="eta" placeholder="ETA">
-<button onclick="addShipment()" id="addBtn">Add</button>
-
-<h2 id="filterTitle">Filter</h2>
-<select id="filter" onchange="fetchShipments()">
-    <option value="">All</option>
-    <option value="Pending">Pending</option>
-    <option value="In Transit">In Transit</option>
-    <option value="Delayed">Delayed</option>
-    <option value="Delivered">Delivered</option>
-</select>
-
-<h2 id="shipmentsTitle">Shipments</h2>
-<div id="list"></div>
+<h2>Login</h2>
+<input id="email" placeholder="Email">
+<input id="password" type="password" placeholder="Password">
+<button onclick="login()">Login</button>
 
 <script>
+let token = "";
 
-// =============================
-// LANGUAGE SYSTEM (SCALABLE)
-// =============================
+async function login() {
+    const email = document.getElementById("email").value;
+    const password = document.getElementById("password").value;
 
-// Load saved language OR default to English
-let currentLang = localStorage.getItem("lang") || "en";
+    const res = await fetch(`/login?email=${email}&password=${password}`, {
+        method: "POST"
+    });
 
-// Translation dictionary
-const translations = {
-    en: {
-        title: "Shipment Tracker",
-        add: "Add Shipment",
-        filter: "Filter",
-        shipments: "Shipments",
-        addBtn: "Add",
-        all: "All",
-        name: "Name",
-        origin: "Origin",
-        destination: "Destination",
-        eta: "ETA",
-        Pending: "Pending",
-        "In Transit": "In Transit",
-        Delayed: "Delayed",
-        Delivered: "Delivered"
-    },
-    pt: {
-        title: "Rastreamento de Cargas",
-        add: "Adicionar Carga",
-        filter: "Filtrar",
-        shipments: "Cargas",
-        addBtn: "Adicionar",
-        all: "Todos",
-        name: "Nome",
-        origin: "Origem",
-        destination: "Destino",
-        eta: "ETA",
-        Pending: "Pendente",
-        "In Transit": "Em Transporte",
-        Delayed: "Atrasado",
-        Delivered: "Entregue"
-    }
-};
-
-// Translation helper
-function t(key) {
-    return translations[currentLang][key] || key;
-}
-
-// Apply translations to UI
-function applyTranslations() {
-    document.getElementById("title").innerText = t("title");
-    document.getElementById("addTitle").innerText = t("add");
-    document.getElementById("filterTitle").innerText = t("filter");
-    document.getElementById("shipmentsTitle").innerText = t("shipments");
-    document.getElementById("addBtn").innerText = t("addBtn");
-
-    document.getElementById("name").placeholder = t("name");
-    document.getElementById("origin").placeholder = t("origin");
-    document.getElementById("destination").placeholder = t("destination");
-    document.getElementById("eta").placeholder = t("eta");
-}
-
-// Change language + persist
-function changeLanguage() {
-    currentLang = document.getElementById("language").value;
-
-    // Save preference (important for SaaS UX)
-    localStorage.setItem("lang", currentLang);
-
-    applyTranslations();
-    fetchShipments();
-}
-
-// =============================
-// STATUS STYLE HELPER
-// =============================
-
-function getStatusClass(status) {
-    return status.replace(" ", "-");
-}
-
-// =============================
-// FETCH DATA (READY FOR BACKEND I18N)
-// =============================
-
-async function fetchShipments() {
-    const filter = document.getElementById('filter').value;
-    let url = '/shipments/';
-
-    if (filter) {
-        url += '?status=' + filter;
-    }
-
-    const res = await fetch(url);
     const data = await res.json();
 
-    const list = document.getElementById('list');
-    list.innerHTML = '';
+    token = data.access_token;
 
-    data.forEach(s => {
-        const div = document.createElement('div');
-        div.className = 'card ' + getStatusClass(s.status);
-
-        div.innerHTML = `
-            <strong>${s.name}</strong><br>
-            ${s.origin} → ${s.destination}<br>
-            ETA: ${s.eta}<br>
-
-            <span class="badge">${t(s.status)}</span><br><br>
-
-            <select onchange="updateStatus(${s.id}, this.value)">
-                <option ${s.status=='Pending'?'selected':''}>Pending</option>
-                <option ${s.status=='In Transit'?'selected':''}>In Transit</option>
-                <option ${s.status=='Delayed'?'selected':''}>Delayed</option>
-                <option ${s.status=='Delivered'?'selected':''}>Delivered</option>
-            </select>
-
-            <button onclick="deleteShipment(${s.id})">Delete</button>
-        `;
-
-        list.appendChild(div);
-    });
+    alert("Logged in!");
 }
-
-// =============================
-// CRUD FUNCTIONS
-// =============================
-
-async function addShipment() {
-    const name = document.getElementById('name').value;
-    const origin = document.getElementById('origin').value;
-    const destination = document.getElementById('destination').value;
-    const eta = document.getElementById('eta').value;
-
-    await fetch(`/shipments/?name=${name}&origin=${origin}&destination=${destination}&eta=${eta}`, {
-        method: 'POST'
-    });
-
-    fetchShipments();
-}
-
-async function updateStatus(id, status) {
-    await fetch(`/shipments/${id}?status=${status}`, {
-        method: 'PUT'
-    });
-
-    fetchShipments();
-}
-
-async function deleteShipment(id) {
-    await fetch(`/shipments/${id}`, {
-        method: 'DELETE'
-    });
-
-    fetchShipments();
-}
-
-// =============================
-// INITIAL LOAD
-// =============================
-
-// Set dropdown to saved language
-document.getElementById("language").value = currentLang;
-
-// Apply UI language
-applyTranslations();
-
-// Load data
-fetchShipments();
-
 </script>
 
 </body>
 </html>
 """
 
-# Serve frontend
 @app.get("/", response_class=HTMLResponse)
 def home():
     return html_content
-
-
-# ====================================
-# RUN COMMAND
-# python3 -m uvicorn main:app --reload
-# ====================================
