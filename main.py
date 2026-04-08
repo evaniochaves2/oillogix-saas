@@ -232,15 +232,94 @@ def delete_shipment(
 html_content = """
 <!DOCTYPE html>
 <html>
+<head>
+    <title>OilLogix SaaS</title>
+
+    <style>
+        body { font-family: Arial; padding: 20px; }
+
+        input, button {
+            margin: 5px;
+            padding: 8px;
+        }
+
+        .hidden { display: none; }
+
+        .card {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+        }
+
+        .Pending { background-color: #eee; }
+        .In-Transit { background-color: #cce5ff; }
+        .Delayed { background-color: #ffcccc; }
+        .Delivered { background-color: #ccffcc; }
+    </style>
+</head>
+
 <body>
 
-<h2>Login</h2>
-<input id="email" placeholder="Email">
-<input id="password" type="password" placeholder="Password">
-<button onclick="login()">Login</button>
+<!-- ========================= -->
+<!-- LOGIN SCREEN -->
+<!-- ========================= -->
+
+<div id="loginView">
+    <h2>Login</h2>
+    <input id="email" placeholder="Email">
+    <input id="password" type="password" placeholder="Password">
+    <br>
+    <button onclick="login()">Login</button>
+    <button onclick="register()">Register</button>
+</div>
+
+<!-- ========================= -->
+<!-- DASHBOARD -->
+<!-- ========================= -->
+
+<div id="appView" class="hidden">
+
+    <h1>🚚 OilLogix Dashboard</h1>
+    <button onclick="logout()">Logout</button>
+
+    <h2>Add Shipment</h2>
+    <input id="name" placeholder="Name">
+    <input id="origin" placeholder="Origin">
+    <input id="destination" placeholder="Destination">
+    <input id="eta" placeholder="ETA">
+    <button onclick="addShipment()">Add</button>
+
+    <h2>Shipments</h2>
+    <div id="list"></div>
+
+</div>
 
 <script>
-let token = "";
+
+// =============================
+// AUTH STATE
+// =============================
+
+let token = localStorage.getItem("token") || "";
+
+// =============================
+// VIEW SWITCHING
+// =============================
+
+function showApp() {
+    document.getElementById("loginView").classList.add("hidden");
+    document.getElementById("appView").classList.remove("hidden");
+}
+
+function showLogin() {
+    document.getElementById("loginView").classList.remove("hidden");
+    document.getElementById("appView").classList.add("hidden");
+}
+
+// =============================
+// AUTH FUNCTIONS
+// =============================
 
 async function login() {
     const email = document.getElementById("email").value;
@@ -252,10 +331,136 @@ async function login() {
 
     const data = await res.json();
 
-    token = data.access_token;
+    if (data.access_token) {
+        token = data.access_token;
 
-    alert("Logged in!");
+        // Save token
+        localStorage.setItem("token", token);
+
+        showApp();
+        fetchShipments();
+    } else {
+        alert("Login failed");
+    }
 }
+
+async function register() {
+    const email = document.getElementById("email").value;
+    const password = document.getElementById("password").value;
+
+    await fetch(`/register?email=${email}&password=${password}`, {
+        method: "POST"
+    });
+
+    alert("User created! Now login.");
+}
+
+function logout() {
+    token = "";
+    localStorage.removeItem("token");
+    showLogin();
+}
+
+// =============================
+// AUTH HEADER
+// =============================
+
+function authHeaders() {
+    return {
+        "Authorization": "Bearer " + token
+    };
+}
+
+// =============================
+// SHIPMENTS
+// =============================
+
+function getStatusClass(status) {
+    return status.replace(" ", "-");
+}
+
+async function fetchShipments() {
+    const res = await fetch('/shipments/', {
+        headers: authHeaders()
+    });
+
+    if (res.status === 401) {
+        logout();
+        return;
+    }
+
+    const data = await res.json();
+
+    const list = document.getElementById('list');
+    list.innerHTML = '';
+
+    data.forEach(s => {
+        const div = document.createElement('div');
+        div.className = 'card ' + getStatusClass(s.status);
+
+        div.innerHTML = `
+            <strong>${s.name}</strong><br>
+            ${s.origin} → ${s.destination}<br>
+            ETA: ${s.eta}<br>
+            Status: ${s.status}<br><br>
+
+            <select onchange="updateStatus(${s.id}, this.value)">
+                <option ${s.status=='Pending'?'selected':''}>Pending</option>
+                <option ${s.status=='In Transit'?'selected':''}>In Transit</option>
+                <option ${s.status=='Delayed'?'selected':''}>Delayed</option>
+                <option ${s.status=='Delivered'?'selected':''}>Delivered</option>
+            </select>
+
+            <button onclick="deleteShipment(${s.id})">Delete</button>
+        `;
+
+        list.appendChild(div);
+    });
+}
+
+async function addShipment() {
+    const name = document.getElementById('name').value;
+    const origin = document.getElementById('origin').value;
+    const destination = document.getElementById('destination').value;
+    const eta = document.getElementById('eta').value;
+
+    await fetch(`/shipments/?name=${name}&origin=${origin}&destination=${destination}&eta=${eta}`, {
+        method: 'POST',
+        headers: authHeaders()
+    });
+
+    fetchShipments();
+}
+
+async function updateStatus(id, status) {
+    await fetch(`/shipments/${id}?status=${status}`, {
+        method: 'PUT',
+        headers: authHeaders()
+    });
+
+    fetchShipments();
+}
+
+async function deleteShipment(id) {
+    await fetch(`/shipments/${id}`, {
+        method: 'DELETE',
+        headers: authHeaders()
+    });
+
+    fetchShipments();
+}
+
+// =============================
+// INITIAL LOAD
+// =============================
+
+if (token) {
+    showApp();
+    fetchShipments();
+} else {
+    showLogin();
+}
+
 </script>
 
 </body>
