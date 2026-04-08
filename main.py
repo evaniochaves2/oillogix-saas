@@ -148,18 +148,26 @@ html_content = """
             border-radius: 12px;
             font-weight: bold;
         }
+
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
     </style>
 </head>
 
 <body>
 
-<!-- LANGUAGE SWITCH -->
-<select id="language" onchange="changeLanguage()">
-    <option value="en">English</option>
-    <option value="pt">Português</option>
-</select>
+<div class="topbar">
+    <h1 id="title">Shipment Tracker</h1>
 
-<h1 id="title">Shipment Tracker</h1>
+    <!-- LANGUAGE SELECTOR -->
+    <select id="language" onchange="changeLanguage()">
+        <option value="en">EN</option>
+        <option value="pt">PT</option>
+    </select>
+</div>
 
 <h2 id="addTitle">Add Shipment</h2>
 <input id="name" placeholder="Name">
@@ -171,10 +179,10 @@ html_content = """
 <h2 id="filterTitle">Filter</h2>
 <select id="filter" onchange="fetchShipments()">
     <option value="">All</option>
-    <option>Pending</option>
-    <option>In Transit</option>
-    <option>Delayed</option>
-    <option>Delivered</option>
+    <option value="Pending">Pending</option>
+    <option value="In Transit">In Transit</option>
+    <option value="Delayed">Delayed</option>
+    <option value="Delivered">Delivered</option>
 </select>
 
 <h2 id="shipmentsTitle">Shipments</h2>
@@ -183,11 +191,13 @@ html_content = """
 <script>
 
 // =============================
-// TRANSLATIONS
+// LANGUAGE SYSTEM (SCALABLE)
 // =============================
 
-let currentLang = "en";
+// Load saved language OR default to English
+let currentLang = localStorage.getItem("lang") || "en";
 
+// Translation dictionary
 const translations = {
     en: {
         title: "Shipment Tracker",
@@ -196,6 +206,10 @@ const translations = {
         shipments: "Shipments",
         addBtn: "Add",
         all: "All",
+        name: "Name",
+        origin: "Origin",
+        destination: "Destination",
+        eta: "ETA",
         Pending: "Pending",
         "In Transit": "In Transit",
         Delayed: "Delayed",
@@ -208,6 +222,10 @@ const translations = {
         shipments: "Cargas",
         addBtn: "Adicionar",
         all: "Todos",
+        name: "Nome",
+        origin: "Origem",
+        destination: "Destino",
+        eta: "ETA",
         Pending: "Pendente",
         "In Transit": "Em Transporte",
         Delayed: "Atrasado",
@@ -215,30 +233,38 @@ const translations = {
     }
 };
 
-// =============================
-// LANGUAGE SWITCH
-// =============================
-
-function changeLanguage() {
-    currentLang = document.getElementById("language").value;
-    applyTranslations();
-    fetchShipments();
-}
-
+// Translation helper
 function t(key) {
     return translations[currentLang][key] || key;
 }
 
+// Apply translations to UI
 function applyTranslations() {
     document.getElementById("title").innerText = t("title");
     document.getElementById("addTitle").innerText = t("add");
     document.getElementById("filterTitle").innerText = t("filter");
     document.getElementById("shipmentsTitle").innerText = t("shipments");
     document.getElementById("addBtn").innerText = t("addBtn");
+
+    document.getElementById("name").placeholder = t("name");
+    document.getElementById("origin").placeholder = t("origin");
+    document.getElementById("destination").placeholder = t("destination");
+    document.getElementById("eta").placeholder = t("eta");
+}
+
+// Change language + persist
+function changeLanguage() {
+    currentLang = document.getElementById("language").value;
+
+    // Save preference (important for SaaS UX)
+    localStorage.setItem("lang", currentLang);
+
+    applyTranslations();
+    fetchShipments();
 }
 
 // =============================
-// STATUS CLASS
+// STATUS STYLE HELPER
 // =============================
 
 function getStatusClass(status) {
@@ -246,7 +272,7 @@ function getStatusClass(status) {
 }
 
 // =============================
-// FETCH + RENDER
+// FETCH DATA (READY FOR BACKEND I18N)
 // =============================
 
 async function fetchShipments() {
@@ -289,7 +315,7 @@ async function fetchShipments() {
 }
 
 // =============================
-// CRUD ACTIONS
+// CRUD FUNCTIONS
 // =============================
 
 async function addShipment() {
@@ -321,8 +347,17 @@ async function deleteShipment(id) {
     fetchShipments();
 }
 
+// =============================
 // INITIAL LOAD
+// =============================
+
+// Set dropdown to saved language
+document.getElementById("language").value = currentLang;
+
+// Apply UI language
 applyTranslations();
+
+// Load data
 fetchShipments();
 
 </script>
