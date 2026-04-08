@@ -1,78 +1,65 @@
-# =============================
-# OilLogix MVP - FULL COMMENTED VERSION
-# =============================
+# ===============================
+# OilLogix MVP - Enhanced Version
+# ===============================
 
-# FastAPI is the web framework used to build the API
+# -------- IMPORTS --------
 from fastapi import FastAPI, Depends, HTTPException
-
-# SQLAlchemy is used to interact with the database
+from fastapi.responses import HTMLResponse
 from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
-
-# Used for timestamps
 from datetime import datetime
 
-# =============================
-# DATABASE SETUP
-# =============================
+# -------- DATABASE SETUP --------
 
-# SQLite database (simple file-based DB for MVP)
 DATABASE_URL = "sqlite:///./oillogix.db"
 
-# Create database engine
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False}  # needed for SQLite
-)
+# Create DB engine (SQLite file)
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 
-# Create session factory (used to talk to DB)
+# Session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Base class for models
 Base = declarative_base()
 
-# =============================
-# FASTAPI APP
-# =============================
-
+# -------- FASTAPI APP --------
 app = FastAPI()
 
-# =============================
-# DATABASE MODEL (TABLE)
-# =============================
+# -------- DATABASE MODEL --------
 
 class Shipment(Base):
-    __tablename__ = "shipments"  # table name
+    """
+    Represents a shipment in the database
+    """
+    __tablename__ = "shipments"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, index=True)  # shipment name
-    origin = Column(String)  # where it starts
-    destination = Column(String)  # where it goes
-    status = Column(String, default="Pending")  # current status
-    eta = Column(String)  # estimated arrival
+    name = Column(String, index=True)
+    origin = Column(String)
+    destination = Column(String)
+    status = Column(String, default="Pending")  # Default status
+    eta = Column(String)
     last_updated = Column(DateTime, default=datetime.utcnow)
 
-# Create tables in DB
+# Create table automatically
 Base.metadata.create_all(bind=engine)
 
-# =============================
-# DATABASE DEPENDENCY
-# =============================
+# -------- DB DEPENDENCY --------
 
-# This function creates a DB session for each request
 def get_db():
+    """
+    Creates and closes DB session per request
+    """
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
-# =============================
-# API ROUTES (BACKEND LOGIC)
-# =============================
+# -------- API ROUTES --------
 
-# CREATE a new shipment
+# CREATE shipment
 @app.post("/shipments/")
 def create_shipment(name: str, origin: str, destination: str, eta: str, db: Session = Depends(get_db)):
     shipment = Shipment(
@@ -81,15 +68,23 @@ def create_shipment(name: str, origin: str, destination: str, eta: str, db: Sess
         destination=destination,
         eta=eta
     )
-    db.add(shipment)  # add to DB
-    db.commit()       # save changes
-    db.refresh(shipment)  # reload object
+    db.add(shipment)
+    db.commit()
+    db.refresh(shipment)
     return shipment
 
 # READ all shipments
 @app.get("/shipments/")
-def get_shipments(db: Session = Depends(get_db)):
-    return db.query(Shipment).all()
+def get_shipments(status: str = None, db: Session = Depends(get_db)):
+    """
+    Optional filtering by status
+    """
+    query = db.query(Shipment)
+
+    if status:
+        query = query.filter(Shipment.status == status)
+
+    return query.all()
 
 # UPDATE shipment status
 @app.put("/shipments/{shipment_id}")
@@ -115,11 +110,11 @@ def delete_shipment(shipment_id: int, db: Session = Depends(get_db)):
 
     db.delete(shipment)
     db.commit()
-
     return {"message": "Deleted"}
 
+
 # =============================
-# FRONTEND (HTML + JAVASCRIPT)
+# FRONTEND (HTML + CSS + JS)
 # =============================
 
 html_content = """
@@ -127,85 +122,114 @@ html_content = """
 <html>
 <head>
     <title>OilLogix Dashboard</title>
+
+    <style>
+        body {
+            font-family: Arial;
+            padding: 20px;
+        }
+
+        input, select, button {
+            margin: 5px;
+            padding: 8px;
+        }
+
+        .card {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+        }
+
+        /* STATUS COLORS */
+        .Pending { background-color: #eee; }
+        .In-Transit { background-color: #cce5ff; }
+        .Delayed { background-color: #ffcccc; }
+        .Delivered { background-color: #ccffcc; }
+
+        .badge {
+            padding: 5px 10px;
+            border-radius: 12px;
+            font-weight: bold;
+        }
+    </style>
 </head>
+
 <body>
 
-    <!-- Language Selector -->
-    <select id="lang" onchange="setLanguage()">
-      <option value="en">English</option>
-      <option value="pt">Português</option>
-    </select>
+<h1>🚚 OilLogix Dashboard</h1>
 
-    <!-- Title -->
-    <h1 id="title">Shipment Tracker</h1>
+<!-- ADD SHIPMENT -->
+<h2>Add Shipment</h2>
+<input id="name" placeholder="Name">
+<input id="origin" placeholder="Origin">
+<input id="destination" placeholder="Destination">
+<input id="eta" placeholder="ETA">
+<button onclick="addShipment()">Add</button>
 
-    <!-- Add Shipment Form -->
-    <h2 id="add_title">Add Shipment</h2>
-    <input id="name" placeholder="Name"><br>
-    <input id="origin" placeholder="Origin"><br>
-    <input id="destination" placeholder="Destination"><br>
-    <input id="eta" placeholder="ETA"><br>
-    <button onclick="addShipment()">Add</button>
+<!-- FILTER -->
+<h2>Filter</h2>
+<select id="filter" onchange="fetchShipments()">
+    <option value="">All</option>
+    <option>Pending</option>
+    <option>In Transit</option>
+    <option>Delayed</option>
+    <option>Delivered</option>
+</select>
 
-    <!-- Shipment List -->
-    <h2 id="list_title">All Shipments</h2>
-    <ul id="list"></ul>
+<!-- SHIPMENTS LIST -->
+<h2>Shipments</h2>
+<div id="list"></div>
 
 <script>
 
-// =============================
-// TRANSLATIONS (EN + PT)
-// =============================
-
-let currentLang = 'en';
-
-const translations = {
-  en: {
-    title: "Shipment Tracker",
-    add: "Add Shipment",
-    list: "All Shipments"
-  },
-  pt: {
-    title: "Rastreamento de Encomendas",
-    add: "Adicionar Envio",
-    list: "Todos os Envios"
-  }
-};
-
-// Change language
-function setLanguage() {
-  currentLang = document.getElementById("lang").value;
-  renderText();
+// Status → CSS class mapping
+function getStatusClass(status) {
+    return status.replace(" ", "-"); // "In Transit" → "In-Transit"
 }
 
-// Apply translations to UI
-function renderText() {
-  document.getElementById("title").innerText = translations[currentLang].title;
-  document.getElementById("add_title").innerText = translations[currentLang].add;
-  document.getElementById("list_title").innerText = translations[currentLang].list;
-}
-
-// =============================
-// API CALLS
-// =============================
-
-// Fetch shipments from backend
+// Fetch shipments (with filter)
 async function fetchShipments() {
-    const res = await fetch('/shipments/');
+    const filter = document.getElementById('filter').value;
+    let url = '/shipments/';
+
+    if (filter) {
+        url += '?status=' + filter;
+    }
+
+    const res = await fetch(url);
     const data = await res.json();
 
     const list = document.getElementById('list');
     list.innerHTML = '';
 
     data.forEach(s => {
-        const li = document.createElement('li');
-        li.innerHTML = `${s.name} - ${s.status} 
-        <button onclick="updateStatus(${s.id})">Update</button>`;
-        list.appendChild(li);
+        const div = document.createElement('div');
+        div.className = 'card ' + getStatusClass(s.status);
+
+        div.innerHTML = `
+            <strong>${s.name}</strong><br>
+            ${s.origin} → ${s.destination}<br>
+            ETA: ${s.eta}<br>
+
+            <span class="badge">${s.status}</span><br><br>
+
+            <!-- STATUS DROPDOWN -->
+            <select onchange="updateStatus(${s.id}, this.value)">
+                <option ${s.status=='Pending'?'selected':''}>Pending</option>
+                <option ${s.status=='In Transit'?'selected':''}>In Transit</option>
+                <option ${s.status=='Delayed'?'selected':''}>Delayed</option>
+                <option ${s.status=='Delivered'?'selected':''}>Delivered</option>
+            </select>
+
+            <button onclick="deleteShipment(${s.id})">Delete</button>
+        `;
+
+        list.appendChild(div);
     });
 }
 
-// Add new shipment
+// Add shipment
 async function addShipment() {
     const name = document.getElementById('name').value;
     const origin = document.getElementById('origin').value;
@@ -219,12 +243,19 @@ async function addShipment() {
     fetchShipments();
 }
 
-// Update shipment status
-async function updateStatus(id) {
-    const status = prompt("Enter new status:");
-
+// Update status
+async function updateStatus(id, status) {
     await fetch(`/shipments/${id}?status=${status}`, {
         method: 'PUT'
+    });
+
+    fetchShipments();
+}
+
+// Delete shipment
+async function deleteShipment(id) {
+    await fetch(`/shipments/${id}`, {
+        method: 'DELETE'
     });
 
     fetchShipments();
@@ -234,21 +265,18 @@ async function updateStatus(id) {
 fetchShipments();
 
 </script>
+
 </body>
 </html>
 """
 
-# =============================
-# SERVE HTML PAGE
-# =============================
-
-from fastapi.responses import HTMLResponse
-
+# Serve frontend
 @app.get("/", response_class=HTMLResponse)
 def home():
     return html_content
 
+
 # ====================================
-# Run with:
+# RUN COMMAND
 # python3 -m uvicorn main:app --reload
 # ====================================
