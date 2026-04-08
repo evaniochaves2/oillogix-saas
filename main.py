@@ -1,30 +1,18 @@
 # =============================
-# OilLogix SaaS - Auth + Multi-User
+# OilLogix SaaS - FULL I18N VERSION
 # =============================
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session, relationship
-from datetime import datetime, timedelta
-
-# Auth libs
-from passlib.context import CryptContext
-from jose import jwt
+from sqlalchemy import create_engine, Column, Integer, String, DateTime
+from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from datetime import datetime
 
 # =============================
-# CONFIG
+# DATABASE SETUP
 # =============================
-
-SECRET_KEY = "supersecretkey"  # change in production
-ALGORITHM = "HS256"
 
 DATABASE_URL = "sqlite:///./oillogix.db"
-
-# =============================
-# DB SETUP
-# =============================
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
@@ -33,35 +21,26 @@ Base = declarative_base()
 app = FastAPI()
 
 # =============================
-# SECURITY
+# TRANSLATIONS (BACKEND)
 # =============================
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+translations = {
+    "en": {
+        "shipment_not_found": "Shipment not found",
+        "deleted": "Deleted successfully"
+    },
+    "pt": {
+        "shipment_not_found": "Carga não encontrada",
+        "deleted": "Excluído com sucesso"
+    }
+}
 
-def hash_password(password: str):
-    return pwd_context.hash(password)
-
-def verify_password(plain, hashed):
-    return pwd_context.verify(plain, hashed)
-
-def create_token(data: dict):
-    data["exp"] = datetime.utcnow() + timedelta(hours=24)
-    return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
+def t(lang: str, key: str):
+    return translations.get(lang, translations["en"]).get(key, key)
 
 # =============================
-# MODELS
+# MODEL
 # =============================
-
-class User(Base):
-    __tablename__ = "users"
-
-    id = Column(Integer, primary_key=True)
-    email = Column(String, unique=True)
-    password = Column(String)
-    language = Column(String, default="en")
-
-    shipments = relationship("Shipment", back_populates="owner")
-
 
 class Shipment(Base):
     __tablename__ = "shipments"
@@ -73,10 +52,6 @@ class Shipment(Base):
     status = Column(String, default="Pending")
     eta = Column(String)
     last_updated = Column(DateTime, default=datetime.utcnow)
-
-    user_id = Column(Integer, ForeignKey("users.id"))
-    owner = relationship("User", back_populates="shipments")
-
 
 Base.metadata.create_all(bind=engine)
 
@@ -92,68 +67,19 @@ def get_db():
         db.close()
 
 # =============================
-# AUTH HELPERS
+# API ROUTES (WITH LANGUAGE)
 # =============================
 
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
-security = HTTPBearer()
-
-def get_current_user(
-    creds: HTTPAuthorizationCredentials = Depends(security),
+@app.get("/shipments/")
+def get_shipments(
+    status: str = None,
+    lang: str = Query("en"),
     db: Session = Depends(get_db)
 ):
-    token = creds.credentials
-
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload.get("user_id")
-    except:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-
-    return user
-
-# =============================
-# AUTH ROUTES
-# =============================
-
-@app.post("/register")
-def register(email: str, password: str, db: Session = Depends(get_db)):
-    existing = db.query(User).filter(User.email == email).first()
-    if existing:
-        raise HTTPException(400, "User already exists")
-
-    user = User(
-        email=email,
-        password=hash_password(password)
-    )
-
-    db.add(user)
-    db.commit()
-
-    return {"message": "User created"}
-
-@app.post("/login")
-def login(email: str, password: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == email).first()
-
-    if not user or not verify_password(password, user.password):
-        raise HTTPException(401, "Invalid credentials")
-
-    token = create_token({"user_id": user.id})
-
-    return {
-        "access_token": token,
-        "language": user.language
-    }
-
-# =============================
-# SHIPMENTS (USER SCOPED)
-# =============================
+    query = db.query(Shipment)
+    if status:
+        query = query.filter(Shipment.status == status)
+    return query.all()
 
 @app.post("/shipments/")
 def create_shipment(
@@ -161,305 +87,279 @@ def create_shipment(
     origin: str,
     destination: str,
     eta: str,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user)
+    db: Session = Depends(get_db)
 ):
     shipment = Shipment(
         name=name,
         origin=origin,
         destination=destination,
-        eta=eta,
-        owner=user
+        eta=eta
     )
-
     db.add(shipment)
     db.commit()
+    db.refresh(shipment)
     return shipment
 
-
-@app.get("/shipments/")
-def get_shipments(
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user)
-):
-    return db.query(Shipment).filter(Shipment.user_id == user.id).all()
-
-
-@app.put("/shipments/{id}")
+@app.put("/shipments/{shipment_id}")
 def update_status(
-    id: int,
+    shipment_id: int,
     status: str,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user)
+    lang: str = Query("en"),
+    db: Session = Depends(get_db)
 ):
-    shipment = db.query(Shipment).filter(
-        Shipment.id == id,
-        Shipment.user_id == user.id
-    ).first()
-
+    shipment = db.query(Shipment).filter(Shipment.id == shipment_id).first()
     if not shipment:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, t(lang, "shipment_not_found"))
 
     shipment.status = status
     shipment.last_updated = datetime.utcnow()
-
     db.commit()
     return shipment
 
-
-@app.delete("/shipments/{id}")
+@app.delete("/shipments/{shipment_id}")
 def delete_shipment(
-    id: int,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user)
+    shipment_id: int,
+    lang: str = Query("en"),
+    db: Session = Depends(get_db)
 ):
-    shipment = db.query(Shipment).filter(
-        Shipment.id == id,
-        Shipment.user_id == user.id
-    ).first()
-
+    shipment = db.query(Shipment).filter(Shipment.id == shipment_id).first()
     if not shipment:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, t(lang, "shipment_not_found"))
 
     db.delete(shipment)
     db.commit()
-    return {"message": "Deleted"}
+    return {"message": t(lang, "deleted")}
 
 # =============================
-# BASIC FRONTEND (LOGIN)
+# FRONTEND (FULL I18N)
 # =============================
 
 html_content = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>OilLogix SaaS</title>
+<title>OilLogix SaaS</title>
 
-    <style>
-        body { font-family: Arial; padding: 20px; }
-
-        input, button {
-            margin: 5px;
-            padding: 8px;
-        }
-
-        .hidden { display: none; }
-
-        .card {
-            padding: 10px;
-            margin: 10px 0;
-            border-radius: 8px;
-            border: 1px solid #ccc;
-        }
-
-        .Pending { background-color: #eee; }
-        .In-Transit { background-color: #cce5ff; }
-        .Delayed { background-color: #ffcccc; }
-        .Delivered { background-color: #ccffcc; }
-    </style>
+<style>
+body { font-family: Arial; padding: 20px; }
+.card { padding: 10px; margin: 10px 0; border-radius: 8px; }
+.Pending { background:#eee; }
+.In-Transit { background:#cce5ff; }
+.Delayed { background:#ffcccc; }
+.Delivered { background:#ccffcc; }
+.hidden { display:none; }
+</style>
 </head>
 
 <body>
 
-<!-- ========================= -->
-<!-- LOGIN SCREEN -->
-<!-- ========================= -->
-
 <div id="loginView">
-    <h2>Login</h2>
-    <input id="email" placeholder="Email">
-    <input id="password" type="password" placeholder="Password">
-    <br>
-    <button onclick="login()">Login</button>
-    <button onclick="register()">Register</button>
+<h2 id="loginTitle"></h2>
+<input id="email" placeholder="Email">
+<input id="password" type="password" placeholder="Password">
+<br>
+<button onclick="login()" id="loginBtn"></button>
+<button onclick="register()" id="registerBtn"></button>
 </div>
-
-<!-- ========================= -->
-<!-- DASHBOARD -->
-<!-- ========================= -->
 
 <div id="appView" class="hidden">
 
-    <h1>🚚 OilLogix Dashboard</h1>
-    <button onclick="logout()">Logout</button>
+<h1 id="title"></h1>
 
-    <h2>Add Shipment</h2>
-    <input id="name" placeholder="Name">
-    <input id="origin" placeholder="Origin">
-    <input id="destination" placeholder="Destination">
-    <input id="eta" placeholder="ETA">
-    <button onclick="addShipment()">Add</button>
+<select id="language" onchange="changeLanguage()">
+<option value="en">EN</option>
+<option value="pt">PT</option>
+</select>
 
-    <h2>Shipments</h2>
-    <div id="list"></div>
+<button onclick="logout()" id="logoutBtn"></button>
+
+<h2 id="addTitle"></h2>
+<input id="name">
+<input id="origin">
+<input id="destination">
+<input id="eta">
+<button onclick="addShipment()" id="addBtn"></button>
+
+<h2 id="filterTitle"></h2>
+<select id="filter" onchange="fetchShipments()"></select>
+
+<div id="list"></div>
 
 </div>
 
 <script>
 
 // =============================
-// AUTH STATE
+// LANGUAGE SYSTEM (FRONTEND)
 // =============================
 
-let token = localStorage.getItem("token") || "";
+let currentLang = localStorage.getItem("lang") || "en";
 
-// =============================
-// VIEW SWITCHING
-// =============================
-
-function showApp() {
-    document.getElementById("loginView").classList.add("hidden");
-    document.getElementById("appView").classList.remove("hidden");
+const translations = {
+en: {
+title:"Shipment Tracker",
+add:"Add Shipment",
+filter:"Filter",
+login:"Login",
+register:"Register",
+logout:"Logout",
+delete:"Delete",
+name:"Name",
+origin:"Origin",
+destination:"Destination",
+eta:"ETA",
+all:"All",
+Pending:"Pending",
+"In Transit":"In Transit",
+Delayed:"Delayed",
+Delivered:"Delivered"
+},
+pt: {
+title:"Rastreamento de Cargas",
+add:"Adicionar Carga",
+filter:"Filtrar",
+login:"Entrar",
+register:"Registrar",
+logout:"Sair",
+delete:"Excluir",
+name:"Nome",
+origin:"Origem",
+destination:"Destino",
+eta:"ETA",
+all:"Todos",
+Pending:"Pendente",
+"In Transit":"Em Transporte",
+Delayed:"Atrasado",
+Delivered:"Entregue"
 }
+};
 
-function showLogin() {
-    document.getElementById("loginView").classList.remove("hidden");
-    document.getElementById("appView").classList.add("hidden");
-}
-
-// =============================
-// AUTH FUNCTIONS
-// =============================
-
-async function login() {
-    const email = document.getElementById("email").value;
-    const password = document.getElementById("password").value;
-
-    const res = await fetch(`/login?email=${email}&password=${password}`, {
-        method: "POST"
-    });
-
-    const data = await res.json();
-
-    if (data.access_token) {
-        token = data.access_token;
-
-        // Save token
-        localStorage.setItem("token", token);
-
-        showApp();
-        fetchShipments();
-    } else {
-        alert("Login failed");
-    }
-}
-
-async function register() {
-    const email = document.getElementById("email").value;
-    const password = document.getElementById("password").value;
-
-    await fetch(`/register?email=${email}&password=${password}`, {
-        method: "POST"
-    });
-
-    alert("User created! Now login.");
-}
-
-function logout() {
-    token = "";
-    localStorage.removeItem("token");
-    showLogin();
+function t(key){
+return translations[currentLang][key] || key;
 }
 
 // =============================
-// AUTH HEADER
+// APPLY TRANSLATIONS
 // =============================
 
-function authHeaders() {
-    return {
-        "Authorization": "Bearer " + token
-    };
-}
+function applyTranslations(){
+document.getElementById("title").innerText = t("title");
+document.getElementById("addTitle").innerText = t("add");
+document.getElementById("filterTitle").innerText = t("filter");
 
-// =============================
-// SHIPMENTS
-// =============================
+document.getElementById("loginBtn").innerText = t("login");
+document.getElementById("registerBtn").innerText = t("register");
+document.getElementById("logoutBtn").innerText = t("logout");
+document.getElementById("addBtn").innerText = t("add");
 
-function getStatusClass(status) {
-    return status.replace(" ", "-");
-}
-
-async function fetchShipments() {
-    const res = await fetch('/shipments/', {
-        headers: authHeaders()
-    });
-
-    if (res.status === 401) {
-        logout();
-        return;
-    }
-
-    const data = await res.json();
-
-    const list = document.getElementById('list');
-    list.innerHTML = '';
-
-    data.forEach(s => {
-        const div = document.createElement('div');
-        div.className = 'card ' + getStatusClass(s.status);
-
-        div.innerHTML = `
-            <strong>${s.name}</strong><br>
-            ${s.origin} → ${s.destination}<br>
-            ETA: ${s.eta}<br>
-            Status: ${s.status}<br><br>
-
-            <select onchange="updateStatus(${s.id}, this.value)">
-                <option ${s.status=='Pending'?'selected':''}>Pending</option>
-                <option ${s.status=='In Transit'?'selected':''}>In Transit</option>
-                <option ${s.status=='Delayed'?'selected':''}>Delayed</option>
-                <option ${s.status=='Delivered'?'selected':''}>Delivered</option>
-            </select>
-
-            <button onclick="deleteShipment(${s.id})">Delete</button>
-        `;
-
-        list.appendChild(div);
-    });
-}
-
-async function addShipment() {
-    const name = document.getElementById('name').value;
-    const origin = document.getElementById('origin').value;
-    const destination = document.getElementById('destination').value;
-    const eta = document.getElementById('eta').value;
-
-    await fetch(`/shipments/?name=${name}&origin=${origin}&destination=${destination}&eta=${eta}`, {
-        method: 'POST',
-        headers: authHeaders()
-    });
-
-    fetchShipments();
-}
-
-async function updateStatus(id, status) {
-    await fetch(`/shipments/${id}?status=${status}`, {
-        method: 'PUT',
-        headers: authHeaders()
-    });
-
-    fetchShipments();
-}
-
-async function deleteShipment(id) {
-    await fetch(`/shipments/${id}`, {
-        method: 'DELETE',
-        headers: authHeaders()
-    });
-
-    fetchShipments();
+document.getElementById("name").placeholder = t("name");
+document.getElementById("origin").placeholder = t("origin");
+document.getElementById("destination").placeholder = t("destination");
+document.getElementById("eta").placeholder = t("eta");
 }
 
 // =============================
-// INITIAL LOAD
+// FILTER TRANSLATION
 // =============================
 
-if (token) {
-    showApp();
-    fetchShipments();
-} else {
-    showLogin();
+function updateFilter(){
+document.getElementById("filter").innerHTML = `
+<option value="">${t("all")}</option>
+<option value="Pending">${t("Pending")}</option>
+<option value="In Transit">${t("In Transit")}</option>
+<option value="Delayed">${t("Delayed")}</option>
+<option value="Delivered">${t("Delivered")}</option>
+`;
 }
+
+// =============================
+// LANGUAGE SWITCH
+// =============================
+
+function changeLanguage(){
+currentLang = document.getElementById("language").value;
+localStorage.setItem("lang", currentLang);
+applyTranslations();
+updateFilter();
+fetchShipments();
+}
+
+// =============================
+// DATE FORMAT (LOCALE)
+// =============================
+
+function formatDate(dateStr){
+return new Date(dateStr).toLocaleString(currentLang);
+}
+
+// =============================
+// FETCH SHIPMENTS
+// =============================
+
+async function fetchShipments(){
+const filter = document.getElementById("filter").value;
+
+let url = `/shipments/?lang=${currentLang}`;
+if(filter) url += `&status=${filter}`;
+
+const res = await fetch(url);
+const data = await res.json();
+
+const list = document.getElementById("list");
+list.innerHTML = "";
+
+data.forEach(s=>{
+const div = document.createElement("div");
+div.className = "card " + s.status.replace(" ","-");
+
+div.innerHTML = `
+<strong>${s.name}</strong><br>
+${s.origin} → ${s.destination}<br>
+ETA: ${s.eta}<br>
+Updated: ${formatDate(s.last_updated)}<br>
+<b>${t(s.status)}</b><br><br>
+
+<select onchange="updateStatus(${s.id}, this.value)">
+<option ${s.status=="Pending"?"selected":""}>Pending</option>
+<option ${s.status=="In Transit"?"selected":""}>In Transit</option>
+<option ${s.status=="Delayed"?"selected":""}>Delayed</option>
+<option ${s.status=="Delivered"?"selected":""}>Delivered</option>
+</select>
+
+<button onclick="deleteShipment(${s.id})">${t("delete")}</button>
+`;
+
+list.appendChild(div);
+});
+}
+
+// =============================
+// CRUD ACTIONS
+// =============================
+
+async function addShipment(){
+await fetch(`/shipments/?name=${name.value}&origin=${origin.value}&destination=${destination.value}&eta=${eta.value}`);
+fetchShipments();
+}
+
+async function updateStatus(id,status){
+await fetch(`/shipments/${id}?status=${status}&lang=${currentLang}`,{method:"PUT"});
+fetchShipments();
+}
+
+async function deleteShipment(id){
+await fetch(`/shipments/${id}?lang=${currentLang}`,{method:"DELETE"});
+fetchShipments();
+}
+
+// =============================
+// INIT
+// =============================
+
+document.getElementById("language").value = currentLang;
+applyTranslations();
+updateFilter();
+fetchShipments();
 
 </script>
 
