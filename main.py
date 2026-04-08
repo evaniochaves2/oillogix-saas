@@ -1,46 +1,79 @@
 # =============================
-# OilLogix SaaS - FULL I18N VERSION
+# OilLogix SaaS - Full Backend
 # =============================
 
-from fastapi import FastAPI, Depends, HTTPException, Query
+import os
+from datetime import datetime, timedelta
+
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from sqlalchemy import create_engine, Column, Integer, String, DateTime
-from sqlalchemy.orm import sessionmaker, declarative_base, Session
-from datetime import datetime
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey
+from sqlalchemy.orm import sessionmaker, Session, declarative_base, relationship
+
+from jose import jwt, JWTError
+from passlib.context import CryptContext
+
+import stripe
+from dotenv import load_dotenv
+
+# =============================
+# ENV CONFIG
+# =============================
+load_dotenv()
+
+DATABASE_URL = "sqlite:///./oillogix.db"
+SECRET_KEY = os.getenv("SECRET_KEY", "supersecret")
+ALGORITHM = "HS256"
+
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+DOMAIN = os.getenv("DOMAIN", "http://localhost:8001")
+
+# Stripe price IDs for tiers
+STRIPE_PRICE_FREE = "price_free"
+STRIPE_PRICE_PRO = "price_pro"
+STRIPE_PRICE_ENT = "price_enterprise"
+
+stripe.api_key = STRIPE_SECRET_KEY
 
 # =============================
 # DATABASE SETUP
 # =============================
-
-DATABASE_URL = "sqlite:///./oillogix.db"
-
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
-app = FastAPI()
+# =============================
+# PASSWORD HASHING
+# =============================
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # =============================
-# TRANSLATIONS (BACKEND)
+# MODELS
 # =============================
 
-translations = {
-    "en": {
-        "shipment_not_found": "Shipment not found",
-        "deleted": "Deleted successfully"
-    },
-    "pt": {
-        "shipment_not_found": "Carga não encontrada",
-        "deleted": "Excluído com sucesso"
-    }
-}
+class Organization(Base):
+    __tablename__ = "organizations"
 
-def t(lang: str, key: str):
-    return translations.get(lang, translations["en"]).get(key, key)
+    id = Column(Integer, primary_key=True)
+    name = Column(String)
 
-# =============================
-# MODEL
-# =============================
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    email = Column(String, unique=True)
+    hashed_password = Column(String)
+
+    organization_id = Column(Integer, ForeignKey("organizations.id"))
+    organization = relationship("Organization")
+
+    stripe_customer_id = Column(String, nullable=True)
+    subscription_status = Column(String, default="inactive")
+    plan = Column(String, default="free")  # free, pro, enterprise
+
 
 class Shipment(Base):
     __tablename__ = "shipments"
@@ -53,12 +86,19 @@ class Shipment(Base):
     eta = Column(String)
     last_updated = Column(DateTime, default=datetime.utcnow)
 
+    organization_id = Column(Integer, ForeignKey("organizations.id"))
+
+
 Base.metadata.create_all(bind=engine)
+
+# =============================
+# APP INIT
+# =============================
+app = FastAPI()
 
 # =============================
 # DB DEPENDENCY
 # =============================
-
 def get_db():
     db = SessionLocal()
     try:
@@ -67,302 +107,259 @@ def get_db():
         db.close()
 
 # =============================
-# API ROUTES (WITH LANGUAGE)
+# AUTH HELPERS
 # =============================
+def create_token(data: dict):
+    return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
 
-@app.get("/shipments/")
-def get_shipments(
-    status: str = None,
-    lang: str = Query("en"),
-    db: Session = Depends(get_db)
-):
-    query = db.query(Shipment)
-    if status:
-        query = query.filter(Shipment.status == status)
-    return query.all()
+def get_current_user(token: str = None, db: Session = Depends(get_db)):
+    if not token:
+        raise HTTPException(401, "Missing token")
 
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("user_id")
+    except JWTError:
+        raise HTTPException(401, "Invalid token")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "User not found")
+
+    return user
+
+# =============================
+# FEATURE GATING
+# =============================
+def get_plan_limits(plan: str):
+    if plan == "free":
+        return {"shipments_limit": 5}
+    elif plan == "pro":
+        return {"shipments_limit": 100}
+    elif plan == "enterprise":
+        return {"shipments_limit": float("inf")}
+    return {"shipments_limit": 0}
+
+def enforce_shipment_limit(user: User, db: Session):
+    limits = get_plan_limits(user.plan)
+
+    count = db.query(Shipment).filter(
+        Shipment.organization_id == user.organization_id
+    ).count()
+
+    if count >= limits["shipments_limit"]:
+        raise HTTPException(
+            status_code=403,
+            detail="Shipment limit reached. Upgrade your plan."
+        )
+
+# =============================
+# AUTH ROUTES
+# =============================
+@app.post("/register")
+def register(email: str, password: str, db: Session = Depends(get_db)):
+    org = Organization(name=f"{email}'s Org")
+    db.add(org)
+    db.commit()
+    db.refresh(org)
+
+    hashed = pwd_context.hash(password)
+
+    user = User(
+        email=email,
+        hashed_password=hashed,
+        organization_id=org.id,
+        plan="free"
+    )
+
+    db.add(user)
+    db.commit()
+
+    return {"message": "User created"}
+
+@app.post("/login")
+def login(email: str, password: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == email).first()
+
+    if not user or not pwd_context.verify(password, user.hashed_password):
+        raise HTTPException(401, "Invalid credentials")
+
+    token = create_token({"user_id": user.id})
+
+    return {"access_token": token}
+
+# =============================
+# STRIPE: CREATE CHECKOUT
+# =============================
+@app.post("/billing/create-checkout")
+def create_checkout(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+
+    if not user.stripe_customer_id:
+        customer = stripe.Customer.create(email=user.email)
+        user.stripe_customer_id = customer["id"]
+        db.commit()
+
+    price_map = {
+        "free": STRIPE_PRICE_FREE,
+        "pro": STRIPE_PRICE_PRO,
+        "enterprise": STRIPE_PRICE_ENT
+    }
+
+    session = stripe.checkout.Session.create(
+        customer=user.stripe_customer_id,
+        mode="subscription",
+        line_items=[{"price": price_map[user.plan], "quantity": 1}],
+        success_url=f"{DOMAIN}/success",
+        cancel_url=f"{DOMAIN}/cancel"
+    )
+
+    return {"url": session.url}
+
+# =============================
+# STRIPE WEBHOOK
+# =============================
+@app.post("/billing/webhook")
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig, STRIPE_WEBHOOK_SECRET
+        )
+    except Exception:
+        raise HTTPException(400, "Invalid webhook")
+
+    data = event["data"]["object"]
+
+    # When subscription is created
+    if event["type"] == "checkout.session.completed":
+        customer_id = data["customer"]
+
+        user = db.query(User).filter(User.stripe_customer_id == customer_id).first()
+
+        if user:
+            user.subscription_status = "active"
+            user.plan = "pro"  # upgrade default (can map dynamically)
+            db.commit()
+
+    # Subscription updates
+    if event["type"] == "customer.subscription.updated":
+        customer_id = data["customer"]
+        status = data["status"]
+
+        user = db.query(User).filter(User.stripe_customer_id == customer_id).first()
+
+        if user:
+            user.subscription_status = status
+            db.commit()
+
+    return {"status": "ok"}
+
+# =============================
+# SHIPMENT ROUTES
+# =============================
 @app.post("/shipments/")
 def create_shipment(
     name: str,
     origin: str,
     destination: str,
     eta: str,
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # 🔒 Feature gating
+    enforce_shipment_limit(user, db)
+
     shipment = Shipment(
         name=name,
         origin=origin,
         destination=destination,
-        eta=eta
+        eta=eta,
+        organization_id=user.organization_id
     )
+
     db.add(shipment)
     db.commit()
     db.refresh(shipment)
+
     return shipment
 
-@app.put("/shipments/{shipment_id}")
-def update_status(
-    shipment_id: int,
-    status: str,
-    lang: str = Query("en"),
-    db: Session = Depends(get_db)
-):
-    shipment = db.query(Shipment).filter(Shipment.id == shipment_id).first()
-    if not shipment:
-        raise HTTPException(404, t(lang, "shipment_not_found"))
-
-    shipment.status = status
-    shipment.last_updated = datetime.utcnow()
-    db.commit()
-    return shipment
-
-@app.delete("/shipments/{shipment_id}")
-def delete_shipment(
-    shipment_id: int,
-    lang: str = Query("en"),
-    db: Session = Depends(get_db)
-):
-    shipment = db.query(Shipment).filter(Shipment.id == shipment_id).first()
-    if not shipment:
-        raise HTTPException(404, t(lang, "shipment_not_found"))
-
-    db.delete(shipment)
-    db.commit()
-    return {"message": t(lang, "deleted")}
+@app.get("/shipments/")
+def get_shipments(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return db.query(Shipment).filter(
+        Shipment.organization_id == user.organization_id
+    ).all()
 
 # =============================
-# FRONTEND (FULL I18N)
+# SIMPLE FRONTEND
 # =============================
-
 html_content = """
 <!DOCTYPE html>
 <html>
 <head>
-<title>OilLogix SaaS</title>
-
-<style>
-body { font-family: Arial; padding: 20px; }
-.card { padding: 10px; margin: 10px 0; border-radius: 8px; }
-.Pending { background:#eee; }
-.In-Transit { background:#cce5ff; }
-.Delayed { background:#ffcccc; }
-.Delivered { background:#ccffcc; }
-.hidden { display:none; }
-</style>
+    <title>OilLogix SaaS</title>
 </head>
-
 <body>
+    <h1>Dashboard</h1>
 
-<div id="loginView">
-<h2 id="loginTitle"></h2>
-<input id="email" placeholder="Email">
-<input id="password" type="password" placeholder="Password">
-<br>
-<button onclick="login()" id="loginBtn"></button>
-<button onclick="register()" id="registerBtn"></button>
-</div>
+    <button onclick="upgrade()">Upgrade Plan</button>
 
-<div id="appView" class="hidden">
+    <h2>Create Shipment</h2>
+    <input id="name" placeholder="Name">
+    <input id="origin" placeholder="Origin">
+    <input id="destination" placeholder="Destination">
+    <input id="eta" placeholder="ETA">
+    <button onclick="addShipment()">Add</button>
 
-<h1 id="title"></h1>
-
-<select id="language" onchange="changeLanguage()">
-<option value="en">EN</option>
-<option value="pt">PT</option>
-</select>
-
-<button onclick="logout()" id="logoutBtn"></button>
-
-<h2 id="addTitle"></h2>
-<input id="name">
-<input id="origin">
-<input id="destination">
-<input id="eta">
-<button onclick="addShipment()" id="addBtn"></button>
-
-<h2 id="filterTitle"></h2>
-<select id="filter" onchange="fetchShipments()"></select>
-
-<div id="list"></div>
-
-</div>
+    <h2>Shipments</h2>
+    <ul id="list"></ul>
 
 <script>
+let token = localStorage.getItem("token");
 
-// =============================
-// LANGUAGE SYSTEM (FRONTEND)
-// =============================
+async function fetchShipments() {
+    const res = await fetch('/shipments/', {
+        headers: { "Authorization": token }
+    });
+    const data = await res.json();
 
-let currentLang = localStorage.getItem("lang") || "en";
+    const list = document.getElementById('list');
+    list.innerHTML = '';
 
-const translations = {
-en: {
-title:"Shipment Tracker",
-add:"Add Shipment",
-filter:"Filter",
-login:"Login",
-register:"Register",
-logout:"Logout",
-delete:"Delete",
-name:"Name",
-origin:"Origin",
-destination:"Destination",
-eta:"ETA",
-all:"All",
-Pending:"Pending",
-"In Transit":"In Transit",
-Delayed:"Delayed",
-Delivered:"Delivered"
-},
-pt: {
-title:"Rastreamento de Cargas",
-add:"Adicionar Carga",
-filter:"Filtrar",
-login:"Entrar",
-register:"Registrar",
-logout:"Sair",
-delete:"Excluir",
-name:"Nome",
-origin:"Origem",
-destination:"Destino",
-eta:"ETA",
-all:"Todos",
-Pending:"Pendente",
-"In Transit":"Em Transporte",
-Delayed:"Atrasado",
-Delivered:"Entregue"
-}
-};
-
-function t(key){
-return translations[currentLang][key] || key;
+    data.forEach(s => {
+        const li = document.createElement('li');
+        li.innerText = `${s.name} - ${s.status}`;
+        list.appendChild(li);
+    });
 }
 
-// =============================
-// APPLY TRANSLATIONS
-// =============================
+async function addShipment() {
+    const name = document.getElementById('name').value;
+    const origin = document.getElementById('origin').value;
+    const destination = document.getElementById('destination').value;
+    const eta = document.getElementById('eta').value;
 
-function applyTranslations(){
-document.getElementById("title").innerText = t("title");
-document.getElementById("addTitle").innerText = t("add");
-document.getElementById("filterTitle").innerText = t("filter");
+    await fetch(`/shipments/?name=${name}&origin=${origin}&destination=${destination}&eta=${eta}`, {
+        method: 'POST',
+        headers: { "Authorization": token }
+    });
 
-document.getElementById("loginBtn").innerText = t("login");
-document.getElementById("registerBtn").innerText = t("register");
-document.getElementById("logoutBtn").innerText = t("logout");
-document.getElementById("addBtn").innerText = t("add");
-
-document.getElementById("name").placeholder = t("name");
-document.getElementById("origin").placeholder = t("origin");
-document.getElementById("destination").placeholder = t("destination");
-document.getElementById("eta").placeholder = t("eta");
+    fetchShipments();
 }
 
-// =============================
-// FILTER TRANSLATION
-// =============================
+async function upgrade() {
+    const res = await fetch('/billing/create-checkout', {
+        method: 'POST',
+        headers: { "Authorization": token }
+    });
 
-function updateFilter(){
-document.getElementById("filter").innerHTML = `
-<option value="">${t("all")}</option>
-<option value="Pending">${t("Pending")}</option>
-<option value="In Transit">${t("In Transit")}</option>
-<option value="Delayed">${t("Delayed")}</option>
-<option value="Delivered">${t("Delivered")}</option>
-`;
+    const data = await res.json();
+    window.location.href = data.url;
 }
 
-// =============================
-// LANGUAGE SWITCH
-// =============================
-
-function changeLanguage(){
-currentLang = document.getElementById("language").value;
-localStorage.setItem("lang", currentLang);
-applyTranslations();
-updateFilter();
 fetchShipments();
-}
-
-// =============================
-// DATE FORMAT (LOCALE)
-// =============================
-
-function formatDate(dateStr){
-return new Date(dateStr).toLocaleString(currentLang);
-}
-
-// =============================
-// FETCH SHIPMENTS
-// =============================
-
-async function fetchShipments(){
-const filter = document.getElementById("filter").value;
-
-let url = `/shipments/?lang=${currentLang}`;
-if(filter) url += `&status=${filter}`;
-
-const res = await fetch(url);
-const data = await res.json();
-
-const list = document.getElementById("list");
-list.innerHTML = "";
-
-data.forEach(s=>{
-const div = document.createElement("div");
-div.className = "card " + s.status.replace(" ","-");
-
-div.innerHTML = `
-<strong>${s.name}</strong><br>
-${s.origin} → ${s.destination}<br>
-ETA: ${s.eta}<br>
-Updated: ${formatDate(s.last_updated)}<br>
-<b>${t(s.status)}</b><br><br>
-
-<select onchange="updateStatus(${s.id}, this.value)">
-<option ${s.status=="Pending"?"selected":""}>Pending</option>
-<option ${s.status=="In Transit"?"selected":""}>In Transit</option>
-<option ${s.status=="Delayed"?"selected":""}>Delayed</option>
-<option ${s.status=="Delivered"?"selected":""}>Delivered</option>
-</select>
-
-<button onclick="deleteShipment(${s.id})">${t("delete")}</button>
-`;
-
-list.appendChild(div);
-});
-}
-
-// =============================
-// CRUD ACTIONS
-// =============================
-
-async function addShipment(){
-await fetch(`/shipments/?name=${name.value}&origin=${origin.value}&destination=${destination.value}&eta=${eta.value}`);
-fetchShipments();
-}
-
-async function updateStatus(id,status){
-await fetch(`/shipments/${id}?status=${status}&lang=${currentLang}`,{method:"PUT"});
-fetchShipments();
-}
-
-async function deleteShipment(id){
-await fetch(`/shipments/${id}?lang=${currentLang}`,{method:"DELETE"});
-fetchShipments();
-}
-
-// =============================
-// INIT
-// =============================
-
-document.getElementById("language").value = currentLang;
-applyTranslations();
-updateFilter();
-fetchShipments();
-
 </script>
-
 </body>
 </html>
 """
@@ -370,3 +367,8 @@ fetchShipments();
 @app.get("/", response_class=HTMLResponse)
 def home():
     return html_content
+
+# =============================
+# RUN:
+# uvicorn main:app --reload
+# =============================
