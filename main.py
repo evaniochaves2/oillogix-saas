@@ -124,10 +124,7 @@ html_content = """
     <title>OilLogix Dashboard</title>
 
     <style>
-        body {
-            font-family: Arial;
-            padding: 20px;
-        }
+        body { font-family: Arial; padding: 20px; }
 
         input, select, button {
             margin: 5px;
@@ -141,7 +138,6 @@ html_content = """
             border: 1px solid #ccc;
         }
 
-        /* STATUS COLORS */
         .Pending { background-color: #eee; }
         .In-Transit { background-color: #cce5ff; }
         .Delayed { background-color: #ffcccc; }
@@ -157,18 +153,22 @@ html_content = """
 
 <body>
 
-<h1>🚚 OilLogix Dashboard</h1>
+<!-- LANGUAGE SWITCH -->
+<select id="language" onchange="changeLanguage()">
+    <option value="en">English</option>
+    <option value="pt">Português</option>
+</select>
 
-<!-- ADD SHIPMENT -->
-<h2>Add Shipment</h2>
+<h1 id="title">Shipment Tracker</h1>
+
+<h2 id="addTitle">Add Shipment</h2>
 <input id="name" placeholder="Name">
 <input id="origin" placeholder="Origin">
 <input id="destination" placeholder="Destination">
 <input id="eta" placeholder="ETA">
-<button onclick="addShipment()">Add</button>
+<button onclick="addShipment()" id="addBtn">Add</button>
 
-<!-- FILTER -->
-<h2>Filter</h2>
+<h2 id="filterTitle">Filter</h2>
 <select id="filter" onchange="fetchShipments()">
     <option value="">All</option>
     <option>Pending</option>
@@ -177,18 +177,78 @@ html_content = """
     <option>Delivered</option>
 </select>
 
-<!-- SHIPMENTS LIST -->
-<h2>Shipments</h2>
+<h2 id="shipmentsTitle">Shipments</h2>
 <div id="list"></div>
 
 <script>
 
-// Status → CSS class mapping
-function getStatusClass(status) {
-    return status.replace(" ", "-"); // "In Transit" → "In-Transit"
+// =============================
+// TRANSLATIONS
+// =============================
+
+let currentLang = "en";
+
+const translations = {
+    en: {
+        title: "Shipment Tracker",
+        add: "Add Shipment",
+        filter: "Filter",
+        shipments: "Shipments",
+        addBtn: "Add",
+        all: "All",
+        Pending: "Pending",
+        "In Transit": "In Transit",
+        Delayed: "Delayed",
+        Delivered: "Delivered"
+    },
+    pt: {
+        title: "Rastreamento de Cargas",
+        add: "Adicionar Carga",
+        filter: "Filtrar",
+        shipments: "Cargas",
+        addBtn: "Adicionar",
+        all: "Todos",
+        Pending: "Pendente",
+        "In Transit": "Em Transporte",
+        Delayed: "Atrasado",
+        Delivered: "Entregue"
+    }
+};
+
+// =============================
+// LANGUAGE SWITCH
+// =============================
+
+function changeLanguage() {
+    currentLang = document.getElementById("language").value;
+    applyTranslations();
+    fetchShipments();
 }
 
-// Fetch shipments (with filter)
+function t(key) {
+    return translations[currentLang][key] || key;
+}
+
+function applyTranslations() {
+    document.getElementById("title").innerText = t("title");
+    document.getElementById("addTitle").innerText = t("add");
+    document.getElementById("filterTitle").innerText = t("filter");
+    document.getElementById("shipmentsTitle").innerText = t("shipments");
+    document.getElementById("addBtn").innerText = t("addBtn");
+}
+
+// =============================
+// STATUS CLASS
+// =============================
+
+function getStatusClass(status) {
+    return status.replace(" ", "-");
+}
+
+// =============================
+// FETCH + RENDER
+// =============================
+
 async function fetchShipments() {
     const filter = document.getElementById('filter').value;
     let url = '/shipments/';
@@ -212,9 +272,8 @@ async function fetchShipments() {
             ${s.origin} → ${s.destination}<br>
             ETA: ${s.eta}<br>
 
-            <span class="badge">${s.status}</span><br><br>
+            <span class="badge">${t(s.status)}</span><br><br>
 
-            <!-- STATUS DROPDOWN -->
             <select onchange="updateStatus(${s.id}, this.value)">
                 <option ${s.status=='Pending'?'selected':''}>Pending</option>
                 <option ${s.status=='In Transit'?'selected':''}>In Transit</option>
@@ -229,7 +288,10 @@ async function fetchShipments() {
     });
 }
 
-// Add shipment
+// =============================
+// CRUD ACTIONS
+// =============================
+
 async function addShipment() {
     const name = document.getElementById('name').value;
     const origin = document.getElementById('origin').value;
@@ -243,7 +305,6 @@ async function addShipment() {
     fetchShipments();
 }
 
-// Update status
 async function updateStatus(id, status) {
     await fetch(`/shipments/${id}?status=${status}`, {
         method: 'PUT'
@@ -252,7 +313,6 @@ async function updateStatus(id, status) {
     fetchShipments();
 }
 
-// Delete shipment
 async function deleteShipment(id) {
     await fetch(`/shipments/${id}`, {
         method: 'DELETE'
@@ -261,7 +321,8 @@ async function deleteShipment(id) {
     fetchShipments();
 }
 
-// Initial load
+// INITIAL LOAD
+applyTranslations();
 fetchShipments();
 
 </script>
